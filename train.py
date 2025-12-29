@@ -157,6 +157,123 @@ class Trainer:
         
         return final_indices
 
+    def _evaluate_epoch(self):
+        """Batch evaluation at epoch end - much faster than per-sample evaluation"""
+        acc_valid = np.array([0, 0, 0, 0])
+        acc_test = np.array([0, 0, 0, 0])
+        valid_size = 0
+        test_size = 0
+        
+        # Buffer for batching
+        eval_batch_size = 64
+        valid_buffer = {'input': [], 'm1': [], 'vec': [], 'len_ts': [], 'label': []}
+        test_buffer = {'input': [], 'm1': [], 'vec': [], 'len_ts': [], 'label': []}
+        
+        def process_buffer(buffer):
+            if not buffer['input']:
+                return np.array([0, 0, 0, 0]), 0
+            
+            b_input = torch.cat(buffer['input'], dim=0)
+            b_m1 = torch.cat(buffer['m1'], dim=0)
+            # vec is list of (1, L) tensors. Stack or Cat along dim 0.
+            b_m2t = torch.cat(buffer['vec'], dim=0)
+            b_len_ts = torch.cat(buffer['len_ts'], dim=0)
+            b_label = torch.cat(buffer['label'], dim=0)
+            N_batch = b_input.shape[0]
+
+            # Predict
+            topk_indices = self.predict_topk_in_chunks(
+                [b_input, b_m1, self.poi_coords, b_m2t, b_len_ts],
+                k=20, chunk_size=2048
+            )
+            
+            acc = calculate_acc(topk_indices, b_label + 1)
+            return acc, N_batch
+
+        eval_bar = tqdm(total=len(self.dataset), desc="Evaluating")
+        
+        for step, item in enumerate(self.data_loader):
+            person_input, person_m1, person_m2t, person_label, person_traj_len = item
+            N = person_input.shape[0]
+            
+            # Accumulate
+            for i in range(N):
+                v_len = person_traj_len[i].item()
+                if v_len > 1:
+                    # Valid (predict at v_len-2)
+                    mask_len_v = v_len - 1
+                    
+                    input_mask_v = torch.zeros((1, max_len, 3), device=device, dtype=torch.long)
+                    input_mask_v[:, :mask_len_v] = 1
+                    v_input = (person_input[i:i+1] * input_mask_v).long()
+                    
+                    m1_mask_v = torch.zeros((1, max_len, max_len, 2), device=device)
+                    m1_mask_v[:, :mask_len_v, :mask_len_v] = 1
+                    v_m1 = person_m1[i:i+1] * m1_mask_v
+                    
+                    v_m2t = person_m2t[i:i+1, mask_len_v-1] # (1, L)
+                    v_len_ts = torch.LongTensor([mask_len_v]).to(device)
+                    v_label = person_label[i:i+1, mask_len_v-1]
+                    
+                    valid_buffer['input'].append(v_input)
+                    valid_buffer['m1'].append(v_m1)
+                    valid_buffer['vec'].append(v_m2t)
+                    valid_buffer['len_ts'].append(v_len_ts)
+                    valid_buffer['label'].append(v_label)
+                    
+                    # Test (predict at v_len-1)
+                    mask_len_t = v_len
+                    
+                    input_mask_t = torch.zeros((1, max_len, 3), device=device, dtype=torch.long)
+                    input_mask_t[:, :mask_len_t] = 1
+                    t_input = (person_input[i:i+1] * input_mask_t).long()
+                    
+                    m1_mask_t = torch.zeros((1, max_len, max_len, 2), device=device)
+                    m1_mask_t[:, :mask_len_t, :mask_len_t] = 1
+                    t_m1 = person_m1[i:i+1] * m1_mask_t
+                    
+                    t_m2t = person_m2t[i:i+1, mask_len_t-1]
+                    t_len_ts = torch.LongTensor([mask_len_t]).to(device)
+                    t_label = person_label[i:i+1, mask_len_t-1]
+                    
+                    test_buffer['input'].append(t_input)
+                    test_buffer['m1'].append(t_m1)
+                    test_buffer['vec'].append(t_m2t)
+                    test_buffer['len_ts'].append(t_len_ts)
+                    test_buffer['label'].append(t_label)
+            
+            # Check Buffer Size
+            if len(valid_buffer['input']) >= eval_batch_size:
+                acc, count = process_buffer(valid_buffer)
+                acc_valid += acc
+                valid_size += count
+                # Reset
+                valid_buffer = {'input': [], 'm1': [], 'vec': [], 'len_ts': [], 'label': []}
+            
+            if len(test_buffer['input']) >= eval_batch_size:
+                acc, count = process_buffer(test_buffer)
+                acc_test += acc
+                test_size += count
+                # Reset
+                test_buffer = {'input': [], 'm1': [], 'vec': [], 'len_ts': [], 'label': []}
+                
+            eval_bar.update(N)
+            
+        # Process remaining
+        if valid_buffer['input']:
+            acc, count = process_buffer(valid_buffer)
+            acc_valid += acc
+            valid_size += count
+            
+        if test_buffer['input']:
+            acc, count = process_buffer(test_buffer)
+            acc_test += acc
+            test_size += count
+            
+        eval_bar.close()
+        
+        return acc_valid, acc_test, valid_size, test_size
+
     def train(self):
         # set optimizer
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0)
@@ -174,91 +291,174 @@ class Trainer:
             train_batches = 0
 
             bar = tqdm(total=part)
+            print(f"DEBUG: Starting Epoch {self.start_epoch + t} Loop. Part={part}")
             for step, item in enumerate(self.data_loader):
+                if step >= part:
+                    print("DEBUG: Breaking loop due to part limit")
+                    break
+                # if step % 50 == 0:
+                #     print(f"DEBUG: Processing Batch {step}")
                 # get batch data, (N, M, 3), (N, M, M, 2), (N, M, M), (N, M), (N)
                 person_input, person_m1, person_m2t, person_label, person_traj_len = item
 
-                # first, try batch_size = 1 and mini_batch = 1
+                N, M, _ = person_input.shape
+                
+                # --- STEP-BATCH TRAINING ---
+                # Construct a large batch where each sample is a single time-step prediction
+                
+                batch_input_list = []
+                batch_m1_list = []
+                batch_vec_list = [] # mat2t slice
+                batch_len_list = []
+                batch_cand_list = []
+                batch_target_list = []
+                
+                # Iterate over users in the mini-batch (N is usually small, e.g. 1 or 16)
+                for i in range(N):
+                    u_len = person_traj_len[i].item()
+                    # We train on steps: from index 1 to u_len-2 (exclude last 2 for valid/test in original split)
+                    # Adjust range according to train_mask logic:
+                    # original: if person_traj_len[i] > 2: train_mask[..., :-2] = True
+                    # So we take steps 0..u_len-3? The label at step t is traj[t+1].
+                    # Let's align with: label = person_label.
+                    # person_label[t] corresponds to prediction at step t (using 0..t history).
+                    
+                    train_indices = []
+                    if u_len > 2:
+                        # indices corresponding to valid training labels
+                        # Original: Valid uses len-2 (label at len-2). Test uses len-1.
+                        # Train uses 0 .. len-3.
+                        train_indices = list(range(0, u_len - 2))
+                    
+                    if not train_indices:
+                        continue
+                        
+                    # Pre-select for this user
+                    u_input = person_input[i] # (M, 3)
+                    u_m1 = person_m1[i] # (M, M, 2)
+                    u_m2t = person_m2t[i] # (M, M)
+                    u_label = person_label[i] # (M)
+                    
+                    # For each training step t
+                    for t in train_indices:
+                        # Input: 0..t. (Length t+1). But we pad to M.
+                        # Masking is handled by model using `traj_len`.
+                        # So we can pass the full u_input, but set length to t+1.
+                        
+                        # Optimization: To avoid replicating u_m1 M times if M is large, 
+                        # we might worry, but M=100 is small.
+                        
+                        # Current history length
+                        hist_len = t + 1
+                        
+                        batch_input_list.append(u_input)
+                        batch_m1_list.append(u_m1)
+                        # vec: time diff from history to current target.
+                        # Current target is step t (predicting label t).
+                        # Wait, label[t] is the location at t+1?
+                        # load.py: labels.append(user_traj[1:, 1]).
+                        # input[t] is user_traj[t].
+                        # So label[t] is indeed next location.
+                        # vec should be time difference to the NEXT time?
+                        # Or Embed expects vec to be time diff between history and CANDIDATE time.
+                        # Candidate time is time[t+1].
+                        # u_m2t[t+1, :] gives diff between t+1 and all j.
+                        # But input is only up to t.
+                        # So we need u_m2t[t+1, :]. 
+                        # But wait, logic check:
+                        # Original code: train_m2t = person_m2t[:, mask_len - 1] where mask_len is input length.
+                        # if input length is hist_len, we take row `hist_len-1`.
+                        # But that is the time diff of the LAST input step.
+                        # That implies we use the last input step's time as the "query time"?
+                        # Re-reading layers.py: Embed uses vec to calculate delta_t.
+                        # delta_t = vec - self.tl ...
+                        # It seems vec IS the time diff vector.
+                        # If original code used `mask_len - 1` (index of last input item),
+                        # implies Query Time = Last Input Time.
+                        # This makes sense for "Next POI" if we assume simple continuity or check gap.
+                        # Let's strictly follow original logic: 
+                        # valid loop: mask_len = v_len - 1. v_m2t = person_m2t[:, mask_len-1]
+                        
+                        # So for input length `hist_len`, we take index `hist_len - 1`.
+                        batch_vec_list.append(u_m2t[hist_len - 1])
+                        batch_len_list.append(hist_len)
+                        
+                        # Candidates
+                        # We need candidates for label[t]
+                        # sample_candidates expects scalar label? No, we optimized it.
+                        # But here we build list.
+                        # Let's just append label and sample later in batch?
+                        # Or sample now.
+                        batch_target_list.append(u_label[t].item())
 
-                input_mask = torch.zeros((self.batch_size, max_len, 3), dtype=torch.long).to(device)
-                m1_mask = torch.zeros((self.batch_size, max_len, max_len, 2), dtype=torch.float32).to(device)
-                for mask_len in range(1, person_traj_len[0]+1):  # from 1 -> len
-                    # if mask_len != person_traj_len[0]:
-                    #     continue
-                    input_mask[:, :mask_len] = 1.
-                    m1_mask[:, :mask_len, :mask_len] = 1.
+                if not batch_input_list:
+                    bar.update(self.batch_size)
+                    continue
 
-                    train_input = person_input * input_mask
-                    train_m1 = person_m1 * m1_mask
-                    train_m2t = person_m2t[:, mask_len - 1]
-                    train_label = person_label[:, mask_len - 1]  # (N)
-                    train_len = torch.zeros(size=(self.batch_size,), dtype=torch.long).to(device) + mask_len
+                # Stack
+                # Inputs: (B, M, 3)
+                train_input = torch.stack(batch_input_list).to(device)
+                train_m1 = torch.stack(batch_m1_list).to(device)
+                # Vec: (B, M)
+                train_m2t = torch.stack(batch_vec_list).to(device)
+                # Len: (B)
+                train_len = torch.LongTensor(batch_len_list).to(device)
+                # Targets: (B)
+                targets_tensor = torch.LongTensor(batch_target_list).to(device)
+                
+                # Sample Candidates for Batch
+                # sample_candidates(label_tensor, ...)
+                cand_locs, target = sample_candidates(targets_tensor, l_max, self.num_neg)
+                # target is all zeros if we use 1st as pos. sample_candidates returns that.
+                # But notice sample_candidates puts positive at 0.
+                
+                # Forward
+                out = self.model(train_input, train_m1, self.poi_coords, train_m2t, train_len, cand_locs)
+                
+                if isinstance(out, tuple):
+                    score, aux = out
+                else:
+                    score, aux = out, None
+                
+                loss_rec = F.cross_entropy(score, target)
+                loss_train = loss_rec
+                
+                if aux:
+                    lambda1 = self.config['loss']['lambda_lb1']
+                    lambda2 = self.config['loss']['lambda_lb2']
+                    loss_train = loss_train + lambda1 * aux['lb1'] + lambda2 * aux['lb2']
+                    
+                    total_lb1 += aux['lb1'].item() if hasattr(aux['lb1'], 'item') else aux['lb1']
+                    total_lb2 += aux['lb2'].item() if hasattr(aux['lb2'], 'item') else aux['lb2']
+                    
+                    if gate1_usage_accum is None:
+                        gate1_usage_accum = aux['gate1_usage']
+                    else:
+                        gate1_usage_accum += aux['gate1_usage']
 
-                    # prob = self.model(train_input, train_m1, self.mat2s, train_m2t, train_len)  # (N, L)
-
-                    if mask_len <= person_traj_len[0] - 2:  # only training
-                        # nn.utils.clip_grad_norm_(self.model.parameters(), 10)
-                        
-                        cand_locs, target = sample_candidates(train_label, l_max, self.num_neg)
-                        
-                        out = self.model(train_input, train_m1, self.poi_coords, train_m2t, train_len, cand_locs)
-                        
-                        if isinstance(out, tuple):
-                            score, aux = out
-                        else:
-                            score, aux = out, None
-                        
-                        loss_rec = F.cross_entropy(score, target)
-                        loss_train = loss_rec
-                        
-                        # Add Aux Loss
-                        if aux:
-                            lambda1 = self.config['loss']['lambda_lb1']
-                            lambda2 = self.config['loss']['lambda_lb2']
-                            loss_train = loss_train + lambda1 * aux['lb1'] + lambda2 * aux['lb2']
-                            
-                            total_lb1 += aux['lb1'].item() if hasattr(aux['lb1'], 'item') else aux['lb1']
-                            total_lb2 += aux['lb2'].item() if hasattr(aux['lb2'], 'item') else aux['lb2']
-                            
-                            if gate1_usage_accum is None:
-                                gate1_usage_accum = aux['gate1_usage']
-                            else:
-                                gate1_usage_accum += aux['gate1_usage']
-
-                        loss_train.backward()
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        scheduler.step()
-                        
-                        total_train_loss += loss_train.item()
-                        total_rec_loss += loss_rec.item()
-                        train_batches += 1
-
-                    elif mask_len == person_traj_len[0] - 1:  # only validation
-                        valid_size += person_input.shape[0]
-                        
-                        topk_indices = self.predict_topk_in_chunks(
-                            [train_input, train_m1, self.poi_coords, train_m2t, train_len],
-                            k=20, chunk_size=2048
-                        )
-                        
-                        # Fix: train_label is 0-based, topk_indices are 1-based. Align them.
-                        acc_valid += calculate_acc(topk_indices, train_label + 1)
-
-                    elif mask_len == person_traj_len[0]:  # only test
-                        test_size += person_input.shape[0]
-                        
-                        topk_indices = self.predict_topk_in_chunks(
-                            [train_input, train_m1, self.poi_coords, train_m2t, train_len],
-                            k=20, chunk_size=2048
-                        )
-                        acc_test += calculate_acc(topk_indices, train_label + 1)
+                loss_train.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                
+                total_train_loss += loss_train.item()
+                total_rec_loss += loss_rec.item()
+                train_batches += 1
+                
 
                 bar.update(self.batch_size)
+            
             bar.close()
+            print(f"DEBUG: Epoch {self.start_epoch + t} Batch Loop Finished. Train Batches: {train_batches}")
 
             avg_loss = total_train_loss / train_batches if train_batches > 0 else 0.0
             avg_rec = total_rec_loss / train_batches if train_batches > 0 else 0.0
+            
+            # --- EPOCH-END VALIDATION & TEST ---
+            self.model.eval()
+            with torch.no_grad():
+                acc_valid, acc_test, valid_size, test_size = self._evaluate_epoch()
+            self.model.train()
             
             # Log results
             log_msg = 'epoch:{}, time:{:.2f}, total_loss:{:.4f}, rec_loss:{:.4f}'.format(

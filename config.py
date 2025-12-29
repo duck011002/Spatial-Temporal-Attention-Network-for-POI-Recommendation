@@ -6,7 +6,7 @@ class Config:
         # Default Configuration
         self.defaults = {
             "model": {
-                "embed_dim": 50,
+                "embed_dim": 32,
                 "dropout": 0.1,
                 "num_layers": 2,
                 "num_heads": 5,
@@ -41,8 +41,9 @@ class Config:
             "train": {
                 "lr": 3e-3,
                 "num_epoch": 100,
-                "batch_size": 1,
+                "batch_size": 6,
                 "num_neg": 10,
+
                 "patience": 10,
                 "device": "cuda",
                 "log_dir": "log"
