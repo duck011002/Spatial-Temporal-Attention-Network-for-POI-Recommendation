@@ -1,0 +1,34 @@
+{
+    "model": {
+        "embed_dim": 50,
+        "dropout": 0.1,
+        "num_layers": 2,
+        "num_heads": 5,
+        "model_type": "hdg_moe"
+    },
+    "moe": {
+        "mechanism_groups": 4,
+        "experts_per_group": [2, 3, 4, 3],
+        "gate1_topk": 2,
+        "gate2_topk": 1,
+        "expert_hidden_mult": 4.0,
+        "gate_hidden_dim": 128
+    },
+    "loss": {
+        "lambda_lb1": 0.01,
+        "lambda_lb2": 0.01
+    },
+    "data": {
+        "use_category": true,
+        "use_admin": true
+    },
+    "train": {
+        "lr": 3e-3,
+        "num_epoch": 50,
+        "batch_size": 1,
+        "num_neg": 10,
+        "patience": 10,
+        "device": "cuda",
+        "log_dir": "log"
+    }
+}
