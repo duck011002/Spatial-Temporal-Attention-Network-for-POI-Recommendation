@@ -61,12 +61,12 @@ def rt_mat2t(traj_time):  # traj_time (*M+1) triangle matrix
     return mat  # (*M, *M)
 
 
-def process_traj(dname):  # start from 1
+def process_traj(dname, data_dir='./data'):  # start from 1
     # data (?, [u, l, t]), poi (L, [l, lat, lon])
-    data = np.load('./data/' + dname + '.npy')
+    data = np.load(data_dir + '/' + dname + '.npy')
     # add the code below if you are using dividing time into minutes instead of hours
-    data[:, -1] = np.array(data[:, -1]/60, dtype=np.int)
-    poi = np.load('./data/' + dname + '_POI.npy')
+    data[:, -1] = np.array(data[:, -1]/60, dtype=np.int64)
+    poi = np.load(data_dir + '/' + dname + '_POI.npy')
     num_user = data[-1, 0]  # max id of users, i.e. NUM
     data_user = data[:, 0]  # user_id sequence in data
     trajs, labels, mat1, mat2t, lens = [], [], [], [], []
@@ -111,12 +111,25 @@ def process_traj(dname):  # start from 1
     labels = pad_sequence(labels, batch_first=True, padding_value=0)  # (NUM, M)
 
     data = [trajs, np.array(mat1), mat2s, np.array(mat2t), labels, np.array(lens), u_max, l_max]
-    data_pkl = './data/' + dname + '_data.pkl'
+    data_pkl = data_dir + '/' + dname + '_data.pkl'
     open(data_pkl, 'a')
     with open(data_pkl, 'wb') as pkl:
         joblib.dump(data, pkl)
 
 
 if __name__ == '__main__':
-    name = 'NYC'
-    process_traj(name)
+    import sys
+    
+    # 支持命令行参数: python load.py [数据集目录] [数据集名称]
+    # 例: python load.py data/TSMC_NYC NYC
+    #     python load.py data/Gowalla Gowalla
+    
+    if len(sys.argv) >= 3:
+        data_dir = sys.argv[1]
+        name = sys.argv[2]
+    else:
+        # 默认使用原始数据
+        data_dir = './data'
+        name = 'NYC'
+    
+    process_traj(name, data_dir)

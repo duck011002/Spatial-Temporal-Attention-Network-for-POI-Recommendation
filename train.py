@@ -74,6 +74,8 @@ class Trainer:
         self.batch_size = 1 # N = 1
         self.learning_rate = 3e-3
         self.num_epoch = 100
+        self.patience = 10  # 早停：连续10轮无提升则停止
+        self.patience_counter = 0
         self.threshold = np.mean(record['acc_valid'][-1]) if load else 0  # 0 if not update
 
         # (NUM, M, 3), (NUM, M, M, 2), (L, L), (NUM, M, M), (NUM, M), (NUM) i.e. [*M]
@@ -152,11 +154,17 @@ class Trainer:
 
             if self.threshold < np.mean(acc_valid):
                 self.threshold = np.mean(acc_valid)
+                self.patience_counter = 0  # 重置计数器
                 # save the model
                 torch.save({'state_dict': self.model.state_dict(),
                             'records': self.records,
                             'time': time.time() - start},
                            'best_stan_win_1000_' + dname + '.pth')
+            else:
+                self.patience_counter += 1
+                if self.patience_counter >= self.patience:
+                    print(f"Early stopping at epoch {self.start_epoch + t}, best valid_acc mean: {self.threshold:.4f}")
+                    break
 
     def inference(self):
         user_ids = []
@@ -206,9 +214,21 @@ class Trainer:
 
 
 if __name__ == '__main__':
+    import sys
+    
+    # 支持命令行参数: python train.py [数据集目录] [数据集名称]
+    # 例: python train.py data/TSMC_NYC NYC
+    #     python train.py data/Gowalla Gowalla
+    
+    if len(sys.argv) >= 3:
+        data_dir = sys.argv[1]
+        dname = sys.argv[2]
+    else:
+        data_dir = './data'
+        dname = 'NYC'
+    
     # load data
-    dname = 'NYC'
-    file = open('./data/' + dname + '_data.pkl', 'rb')
+    file = open(data_dir + '/' + dname + '_data.pkl', 'rb')
     file_data = joblib.load(file)
     # tensor(NUM, M, 3), np(NUM, M, M, 2), np(L, L), np(NUM, M, M), tensor(NUM, M), np(NUM)
     [trajs, mat1, mat2s, mat2t, labels, lens, u_max, l_max] = file_data
