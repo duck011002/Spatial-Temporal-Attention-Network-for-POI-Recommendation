@@ -43,3 +43,17 @@ A2.7: It is common practice to run under different seeds and get the average val
 
 Q3: What is the environment to run the code? And version?  
 A3: We use python 3.7.2, CUDA 10.1 and PyTorch 1.7.1. Make sure to install all libs that we import.  
+
+     # 1. 安装依赖
+     pip install torch numpy pandas joblib tqdm
+
+     # 2. 预处理原始数据（如果需要）
+     python preprocess_raw.py dataset_tsmc2014/dataset_TSMC2014_NYC.txt data/TSMC_NYC NYC
+
+     # 3. 生成训练数据（如果需要）
+     python load.py data/TSMC_NYC NYC
+
+     # 4. 训练模型
+     python train.py data/TSMC_NYC NYC --part 1000 --epoch 50 --config full_run_config.json
+
+   如果 NYC_data.pkl 已存在，可跳过步骤 2-3，直接运行步骤 4。
