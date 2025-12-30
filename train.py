@@ -339,18 +339,18 @@ class Trainer:
                     u_m2t = person_m2t[i] # (M, M)
                     u_label = person_label[i] # (M)
                     
-                    # For each training step t
-                    for t in train_indices:
-                        # Input: 0..t. (Length t+1). But we pad to M.
+                    # For each training step idx
+                    for idx in train_indices:
+                        # Input: 0..idx. (Length idx+1). But we pad to M.
                         # Masking is handled by model using `traj_len`.
-                        # So we can pass the full u_input, but set length to t+1.
-                        
+                        # So we can pass the full u_input, but set length to idx+1.
+
                         # Optimization: To avoid replicating u_m1 M times if M is large, 
                         # we might worry, but M=100 is small.
                         
                         # Current history length
-                        hist_len = t + 1
-                        
+                        hist_len = idx + 1
+
                         batch_input_list.append(u_input)
                         batch_m1_list.append(u_m1)
                         # vec: time diff from history to current target.
@@ -384,12 +384,12 @@ class Trainer:
                         batch_len_list.append(hist_len)
                         
                         # Candidates
-                        # We need candidates for label[t]
+                        # We need candidates for label[idx]
                         # sample_candidates expects scalar label? No, we optimized it.
                         # But here we build list.
                         # Let's just append label and sample later in batch?
                         # Or sample now.
-                        batch_target_list.append(u_label[t].item())
+                        batch_target_list.append(u_label[idx].item())
 
                 if not batch_input_list:
                     bar.update(self.batch_size)
